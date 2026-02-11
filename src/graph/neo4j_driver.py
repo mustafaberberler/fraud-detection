@@ -12,3 +12,4 @@ class Neo4jDriver:
             session.execute_write(
                 lambda tx: tx.run(query, params or {})
             )
+

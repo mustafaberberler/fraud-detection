@@ -75,3 +75,4 @@ if __name__ == "__main__":
 
     print("Mean (first feature):", X_normal[:, 0].mean())
     print("Std (first feature):", X_normal[:, 0].std())
+

@@ -82,3 +82,4 @@ with driver.session() as session:
         neo4j_write_latency.observe(elapsed)
 
         transactions_total.inc()
+        

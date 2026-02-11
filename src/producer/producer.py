@@ -25,3 +25,7 @@ while True:
     producer.send("fraud-transactions", transaction)
     print("Sent:", transaction)
     time.sleep(1)
+
+
+
+

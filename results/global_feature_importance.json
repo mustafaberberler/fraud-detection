@@ -1,0 +1,82 @@
+[
+  {
+    "feature": "amt",
+    "mean_abs_shap": 1.4833630869040877
+  },
+  {
+    "feature": "category",
+    "mean_abs_shap": 1.171704800220773
+  },
+  {
+    "feature": "amt_sum_24h",
+    "mean_abs_shap": 0.9509809184714062
+  },
+  {
+    "feature": "hour",
+    "mean_abs_shap": 0.7409438277016506
+  },
+  {
+    "feature": "age",
+    "mean_abs_shap": 0.6711263348779363
+  },
+  {
+    "feature": "city_pop",
+    "mean_abs_shap": 0.47804432017710585
+  },
+  {
+    "feature": "time_since_last_tx",
+    "mean_abs_shap": 0.45027682770668565
+  },
+  {
+    "feature": "ae_anomaly_score",
+    "mean_abs_shap": 0.3931328577259308
+  },
+  {
+    "feature": "day_of_week",
+    "mean_abs_shap": 0.3199171210896895
+  },
+  {
+    "feature": "amt_mean_hist",
+    "mean_abs_shap": 0.25655625725223563
+  },
+  {
+    "feature": "month",
+    "mean_abs_shap": 0.24199966955587085
+  },
+  {
+    "feature": "amt_vs_mean",
+    "mean_abs_shap": 0.2192940008752272
+  },
+  {
+    "feature": "is_online",
+    "mean_abs_shap": 0.2107471804831918
+  },
+  {
+    "feature": "geo_distance_km",
+    "mean_abs_shap": 0.19802624787473824
+  },
+  {
+    "feature": "gender",
+    "mean_abs_shap": 0.13957288157288703
+  },
+  {
+    "feature": "tx_count_1h",
+    "mean_abs_shap": 0.07422026013248437
+  },
+  {
+    "feature": "is_pos",
+    "mean_abs_shap": 0.06995236558911336
+  },
+  {
+    "feature": "geo_distance_log",
+    "mean_abs_shap": 0.02692155130736354
+  },
+  {
+    "feature": "is_weekend",
+    "mean_abs_shap": 0.01598678946983533
+  },
+  {
+    "feature": "is_night",
+    "mean_abs_shap": 0.010842569941994763
+  }
+]

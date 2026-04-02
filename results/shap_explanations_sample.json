@@ -1,0 +1,227 @@
+[
+  {
+    "timestamp": "2026-03-15T18:48:33.780595Z",
+    "fraud_probability": 0.985456,
+    "risk_level": "HIGH",
+    "shap_base_value": -15.724662,
+    "top_features": [
+      {
+        "feature": "amt",
+        "value": 1086.32,
+        "shap_value": 9.740311,
+        "direction": "fraud",
+        "rank": 1
+      },
+      {
+        "feature": "amt_sum_24h",
+        "value": 1764.16,
+        "shap_value": 4.742167,
+        "direction": "fraud",
+        "rank": 2
+      },
+      {
+        "feature": "hour",
+        "value": 22.0,
+        "shap_value": 3.186835,
+        "direction": "fraud",
+        "rank": 3
+      },
+      {
+        "feature": "ae_anomaly_score",
+        "value": 4.337024,
+        "shap_value": 1.401343,
+        "direction": "fraud",
+        "rank": 4
+      },
+      {
+        "feature": "gender",
+        "value": "M",
+        "shap_value": 1.374527,
+        "direction": "fraud",
+        "rank": 5
+      }
+    ],
+    "total_features_used": 20,
+    "model_version": "lgbm_hybrid_v1"
+  },
+  {
+    "timestamp": "2026-03-15T18:48:33.787256Z",
+    "fraud_probability": 0.999994,
+    "risk_level": "HIGH",
+    "shap_base_value": -15.724662,
+    "top_features": [
+      {
+        "feature": "amt",
+        "value": 299.29,
+        "shap_value": 10.154352,
+        "direction": "fraud",
+        "rank": 1
+      },
+      {
+        "feature": "category",
+        "value": "grocery_pos",
+        "shap_value": 4.883144,
+        "direction": "fraud",
+        "rank": 2
+      },
+      {
+        "feature": "amt_sum_24h",
+        "value": 2032.57,
+        "shap_value": 4.541385,
+        "direction": "fraud",
+        "rank": 3
+      },
+      {
+        "feature": "hour",
+        "value": 0.0,
+        "shap_value": 3.982424,
+        "direction": "fraud",
+        "rank": 4
+      },
+      {
+        "feature": "amt_vs_mean",
+        "value": 6.587035,
+        "shap_value": 2.17348,
+        "direction": "fraud",
+        "rank": 5
+      }
+    ],
+    "total_features_used": 20,
+    "model_version": "lgbm_hybrid_v1"
+  },
+  {
+    "timestamp": "2026-03-15T18:48:33.793241Z",
+    "fraud_probability": 0.999987,
+    "risk_level": "HIGH",
+    "shap_base_value": -15.724662,
+    "top_features": [
+      {
+        "feature": "amt",
+        "value": 342.3,
+        "shap_value": 13.022884,
+        "direction": "fraud",
+        "rank": 1
+      },
+      {
+        "feature": "category",
+        "value": "grocery_pos",
+        "shap_value": 5.991861,
+        "direction": "fraud",
+        "rank": 2
+      },
+      {
+        "feature": "amt_sum_24h",
+        "value": 1118.93,
+        "shap_value": 2.421254,
+        "direction": "fraud",
+        "rank": 3
+      },
+      {
+        "feature": "hour",
+        "value": 1.0,
+        "shap_value": 2.165129,
+        "direction": "fraud",
+        "rank": 4
+      },
+      {
+        "feature": "is_online",
+        "value": 0.0,
+        "shap_value": 1.038902,
+        "direction": "fraud",
+        "rank": 5
+      }
+    ],
+    "total_features_used": 20,
+    "model_version": "lgbm_hybrid_v1"
+  },
+  {
+    "timestamp": "2026-03-15T18:48:33.799239Z",
+    "fraud_probability": 0.999931,
+    "risk_level": "HIGH",
+    "shap_base_value": -15.724662,
+    "top_features": [
+      {
+        "feature": "amt",
+        "value": 1318.89,
+        "shap_value": 8.172714,
+        "direction": "fraud",
+        "rank": 1
+      },
+      {
+        "feature": "amt_sum_24h",
+        "value": 2073.1,
+        "shap_value": 6.061949,
+        "direction": "fraud",
+        "rank": 2
+      },
+      {
+        "feature": "amt_mean_hist",
+        "value": 691.033333,
+        "shap_value": 4.527538,
+        "direction": "fraud",
+        "rank": 3
+      },
+      {
+        "feature": "hour",
+        "value": 22.0,
+        "shap_value": 3.129188,
+        "direction": "fraud",
+        "rank": 4
+      },
+      {
+        "feature": "ae_anomaly_score",
+        "value": 10.510091,
+        "shap_value": 1.213447,
+        "direction": "fraud",
+        "rank": 5
+      }
+    ],
+    "total_features_used": 20,
+    "model_version": "lgbm_hybrid_v1"
+  },
+  {
+    "timestamp": "2026-03-15T18:48:33.805229Z",
+    "fraud_probability": 0.999209,
+    "risk_level": "HIGH",
+    "shap_base_value": -15.724662,
+    "top_features": [
+      {
+        "feature": "amt_sum_24h",
+        "value": 2380.42,
+        "shap_value": 7.571144,
+        "direction": "fraud",
+        "rank": 1
+      },
+      {
+        "feature": "amt",
+        "value": 419.94,
+        "shap_value": 7.063815,
+        "direction": "fraud",
+        "rank": 2
+      },
+      {
+        "feature": "hour",
+        "value": 23.0,
+        "shap_value": 3.380487,
+        "direction": "fraud",
+        "rank": 3
+      },
+      {
+        "feature": "ae_anomaly_score",
+        "value": 1.387812,
+        "shap_value": 1.499267,
+        "direction": "fraud",
+        "rank": 4
+      },
+      {
+        "feature": "city_pop",
+        "value": 1807.0,
+        "shap_value": 1.388129,
+        "direction": "fraud",
+        "rank": 5
+      }
+    ],
+    "total_features_used": 20,
+    "model_version": "lgbm_hybrid_v1"
+  }
+]

@@ -1,0 +1,11 @@
+# Prometheus Configuration — Fraud Detection Pipeline
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "fraud-pipeline"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: "fraud-consumer"

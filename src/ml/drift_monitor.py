@@ -1,13 +1,13 @@
 """
-Gerçek Zamanlı Drift Monitor — PSI / KL Divergence
+Real-Time Drift Monitor — PSI / KL Divergence
 ===================================================
-Kafka consumer pipeline'ına entegre edilir.
-Her işlem accumulate edilir, window dolunca drift kontrolü yapılır.
-Drift tespit edilirse drift-alerts topic'ine alarm gönderilir.
+Integrated into the Kafka consumer pipeline.
+Every transaction is accumulated, and the drift check runs once the window is full.
+If drift is detected, an alert is sent to the drift-alerts topic.
 
-Tez önerisindeki taahhüt:
-  "PSI ve KL Divergence ile veri dağılımı izleme,
-   drift tespit edildiğinde eşikler adaptif güncellenecek."
+Commitment in the thesis proposal:
+  "Data distribution monitoring with PSI and KL Divergence,
+   thresholds will be updated adaptively when drift is detected."
 """
 
 import json
@@ -29,9 +29,9 @@ logger = logging.getLogger(__name__)
 
 class DriftMonitor:
     """
-    Sliding-window tabanlı gerçek zamanlı drift izleyici.
+    Sliding-window based real-time drift monitor.
 
-    Kullanım:
+    Usage:
         monitor = DriftMonitor()
         monitor.load_reference()
 
@@ -58,7 +58,7 @@ class DriftMonitor:
         self._loaded = False
 
     def load_reference(self):
-        """Referans dağılım istatistiklerini yükle (training verisinden)."""
+        """Load the reference distribution statistics (from the training data)."""
         try:
             with open(REFERENCE_DIST_PATH, "r") as f:
                 self.reference_stats = json.load(f)
@@ -69,7 +69,7 @@ class DriftMonitor:
             self._loaded = False
 
     def accumulate(self, transaction: dict):
-        """Yeni işlemi sliding window'a ekle."""
+        """Add the new transaction to the sliding window."""
         for feat in LGBM_FEATURES:
             val = transaction.get(feat)
             if val is not None:
@@ -83,7 +83,7 @@ class DriftMonitor:
         self.transaction_count += 1
 
     def should_check(self) -> bool:
-        """Drift kontrolü zamanı geldi mi?"""
+        """Is it time for a drift check?"""
         return (
             self._loaded
             and self.transaction_count - self.last_check_count >= self.check_interval
@@ -92,8 +92,8 @@ class DriftMonitor:
 
     def check_drift(self) -> dict | None:
         """
-        Tüm feature'lar için PSI ve KL hesapla.
-        Drift varsa Kafka-ready alert JSON döndür, yoksa None.
+        Compute PSI and KL for all features.
+        If there is drift, return a Kafka-ready alert JSON, otherwise None.
         """
         self.last_check_count = self.transaction_count
         t_start = time.perf_counter()
@@ -117,7 +117,7 @@ class DriftMonitor:
                 "kl_status": kl_status,
             }
 
-        # Kritik feature'ları bul
+        # Find the critical features
         critical = [
             {"feature": f, "psi": r["psi"], "kl_divergence": r["kl_divergence"]}
             for f, r in results.items()
@@ -135,7 +135,7 @@ class DriftMonitor:
 
         self.last_drift_result = results
 
-        # Sadece warning veya critical varsa alert üret
+        # Generate an alert only if there is a warning or critical
         if len(critical) > 0 or len(warning) > 0:
             alert = {
                 "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -175,10 +175,10 @@ class DriftMonitor:
         return None
 
     # -------------------------------------------------------------------------
-    # PSI / KL hesaplama (drift_monitoring.ipynb ile aynı formüller)
+    # PSI / KL computation (same formulas as drift_monitoring.ipynb)
     # -------------------------------------------------------------------------
     def _psi_numeric(self, feature: str, n_bins: int = 10) -> float:
-        """Numeric feature için PSI hesapla."""
+        """Compute PSI for a numeric feature."""
         current = np.array(self.buffer[feature])
         if len(current) < 50:
             return 0.0
@@ -195,8 +195,8 @@ class DriftMonitor:
             n_bins + 1,
         )
 
-        # Referans dağılımı istatistiklerden yeniden oluştur (histogram yok,
-        # mean/std'den normal dağılım varsayımı ile bin oranları hesapla)
+        # Rebuild the reference distribution from the statistics (no histogram,
+        # compute the bin proportions from mean/std assuming a normal distribution)
         from scipy.stats import norm
         ref_cdf = norm.cdf(breakpoints, loc=ref["mean"], scale=ref["std"])
         ref_pct = np.diff(ref_cdf)
@@ -210,7 +210,7 @@ class DriftMonitor:
         return max(psi, 0.0)
 
     def _kl_numeric(self, feature: str, n_bins: int = 10) -> float:
-        """Simetrik KL Divergence."""
+        """Symmetric KL Divergence."""
         current = np.array(self.buffer[feature])
         if len(current) < 50:
             return 0.0
@@ -241,7 +241,7 @@ class DriftMonitor:
         return (kl_fwd + kl_rev) / 2
 
     def _psi_categorical(self, feature: str) -> float:
-        """Categorical feature için PSI."""
+        """PSI for a categorical feature."""
         current = list(self.categorical_buffer[feature])
         if len(current) < 50:
             return 0.0
@@ -253,7 +253,7 @@ class DriftMonitor:
         eps = 1e-6
         ref_counts = ref.get("value_counts", {})
 
-        # Current dağılım
+        # Current distribution
         from collections import Counter
         cur_counter = Counter(current)
         total = sum(cur_counter.values())

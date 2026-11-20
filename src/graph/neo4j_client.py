@@ -1,20 +1,28 @@
 """
 Neo4j Graph Client — Fraud Ring Detection
 ==========================================
-Kafka consumer'dan gelen işlemleri graf yapısına yazar.
-PageRank ve Louvain community detection ile fraud ring tespiti yapar.
+Writes the transactions coming from the Kafka consumer into a graph structure.
+Detects fraud ring clusters by running real PageRank and Louvain
+community detection algorithms with the Neo4j GDS (Graph Data Science) library.
 
-Tez önerisindeki taahhüt:
-  "Müşteri–kart–cihaz–IP–merchant ilişkileri Neo4j'de graph yapısıyla
-   modellenecek, PageRank ve Community Detection algoritmalarıyla
-   fraud ringd kümeleri tespit eilecektir."
-
-Graph Şeması:
+Graph Schema:
   (Customer)-[:MADE]->(Transaction)-[:AT]->(Merchant)
   (Transaction {is_fraud, fraud_prob, amount, timestamp, ...})
 
-  Sparkov dataseti Customer ve Merchant entity'lerini içerir.
-  Device/IP bilgisi Sparkov'da yok — bu yüzden şema Customer-Merchant odaklı.
+  The Sparkov dataset contains Customer and Merchant entities.
+  Sparkov has no Device/IP information — so the schema is Customer-Merchant focused.
+
+GDS Integration:
+  - Graph projection: Customer and Merchant nodes are projected in memory
+    (in-memory) via the MADE/AT relationships.
+  - PageRank: Runs weighted by the fraud_weight property written on the
+    Transaction edges (relationshipWeightProperty), so the score measures
+    "fraud-aware centrality" rather than "raw centrality".
+  - Louvain: Fraud ring candidate clusters are found with community detection;
+    for each community, the fraud rate is compared with the overall average
+    (lift score) to assess whether the cluster is meaningful.
+  - If GDS is not installed/reachable, the class automatically falls back to a
+    simple Cypher aggregation (heuristic) and logs it.
 """
 
 import time
@@ -25,24 +33,28 @@ from config.settings import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 
 logger = logging.getLogger(__name__)
 
+GDS_GRAPH_NAME = "fraudGraph"
+
 
 class Neo4jClient:
     """
-    Neo4j graph veritabanına işlem yazan ve graph analytics çalıştıran client.
+    Client that writes transactions to the Neo4j graph database and runs
+    GDS-based graph analytics (PageRank, Louvain).
     """
 
     def __init__(self):
         self.driver = None
         self._connected = False
+        self._gds_available = False
 
     def connect(self):
-        """Neo4j'ye bağlan ve index/constraint oluştur."""
+        """Connect to Neo4j, create indexes/constraints and check whether GDS is present."""
         try:
             from neo4j import GraphDatabase
             self.driver = GraphDatabase.driver(
                 NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD)
             )
-            # Bağlantı testi
+            # Connection test
             with self.driver.session() as session:
                 session.run("RETURN 1")
 
@@ -50,13 +62,30 @@ class Neo4jClient:
             self._connected = True
             logger.info(f"  ✓ Neo4j bağlantısı kuruldu: {NEO4J_URI}")
 
+            self._check_gds()
+
         except Exception as e:
             logger.warning(f"  ⚠ Neo4j bağlantısı kurulamadı: {e}")
             logger.warning("    Graph analytics devre dışı, pipeline devam edecek.")
             self._connected = False
 
+    def _check_gds(self):
+        """Check whether the GDS library is installed."""
+        try:
+            with self.driver.session() as session:
+                result = session.run("CALL gds.version() YIELD gdsVersion RETURN gdsVersion")
+                version = result.single()["gdsVersion"]
+                self._gds_available = True
+                logger.info(f"  ✓ Neo4j GDS bulundu (v{version}) — PageRank/Louvain aktif")
+        except Exception as e:
+            self._gds_available = False
+            logger.warning(
+                f"  ⚠ Neo4j GDS bulunamadı ({e}). "
+                "PageRank/Louvain heuristic fallback ile çalışacak."
+            )
+
     def _create_indexes(self):
-        """Performans için index ve uniqueness constraint oluştur."""
+        """Create indexes and uniqueness constraints for performance."""
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Customer) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Merchant) REQUIRE m.id IS UNIQUE",
@@ -68,19 +97,23 @@ class Neo4jClient:
                 try:
                     session.run(q)
                 except Exception:
-                    pass  # Constraint zaten varsa hata vermesin
+                    pass  # Don't raise an error if the constraint already exists
         logger.info("  ✓ Neo4j index/constraint'ler oluşturuldu")
 
     def write_transaction(self, transaction: dict, prediction: dict) -> float:
         """
-        İşlemi graf'a yaz. Customer → Transaction → Merchant ilişkisi.
+        Write the transaction to the graph. Customer → Transaction → Merchant relationship.
+
+        The `fraud_weight` property is written on the MADE and AT relationships
+        (based on fraud_prob); this property is used so that PageRank
+        runs in a weighted manner.
 
         Args:
-            transaction: Ham işlem verisi (Sparkov CSV'den)
-            prediction:  Model tahmin sonucu (inference.py çıktısı)
+            transaction: Raw transaction data (from the Sparkov CSV)
+            prediction:  Model prediction result (output of inference.py)
 
         Returns:
-            float: Neo4j yazma süresi (saniye)
+            float: Neo4j write duration (seconds)
         """
         if not self._connected:
             return 0.0
@@ -103,79 +136,150 @@ class Neo4jClient:
     @staticmethod
     def _create_transaction_subgraph(tx, transaction, prediction):
         """
-        Cypher sorgusu ile Customer → Transaction → Merchant subgraph oluştur.
+        Create the Customer → Transaction → Merchant subgraph with a Cypher query.
+        fraud_weight is written on the MADE/AT relationships (min 0.01, based on fraud_prob)
+        — for PageRank weighting.
         """
         query = """
-        // Customer node (MERGE = varsa bul, yoksa oluştur)
         MERGE (c:Customer {id: $customer_id})
         ON CREATE SET c.created_at = datetime()
 
-        // Merchant node
         MERGE (m:Merchant {id: $merchant_id})
         ON CREATE SET
             m.category = $category,
             m.created_at = datetime()
 
-        // Transaction node
-        CREATE (t:Transaction {
-            id:              $tx_id,
-            amount:          $amount,
-            timestamp:       $timestamp,
-            hour:            $hour,
-            day_of_week:     $day_of_week,
-            is_fraud:        $is_fraud,
-            fraud_prob:      $fraud_prob,
-            risk_level:      $risk_level,
-            ae_anomaly:      $ae_anomaly,
-            created_at:      datetime()
-        })
+        MERGE (t:Transaction {id: $tx_id})
+        ON CREATE SET
+            t.amount     = $amount,
+            t.timestamp  = $timestamp,
+            t.hour       = $hour,
+            t.day_of_week = $day_of_week,
+            t.is_fraud   = $is_fraud,
+            t.fraud_prob = $fraud_prob,
+            t.risk_level = $risk_level,
+            t.ae_anomaly = $ae_anomaly,
+            t.created_at = datetime()
 
-        // İlişkiler
-        MERGE (c)-[:MADE]->(t)
-        MERGE (t)-[:AT]->(m)
+        MERGE (c)-[r1:MADE]->(t)
+        ON CREATE SET r1.fraud_weight = $fraud_weight
+        MERGE (t)-[r2:AT]->(m)
+        ON CREATE SET r2.fraud_weight = $fraud_weight
 
-        // Fraud ise Customer'a risk flag ekle
         WITH c, t
         WHERE t.is_fraud = true
         SET c.has_fraud = true,
             c.last_fraud_at = datetime()
         """
 
-        # Sparkov'dan customer ve merchant ID'leri
-        # (Sparkov'da cc_num = customer, merchant = merchant name)
+        # tx_id: use trans_id if present, otherwise the timestamp+cc_num+amt combination
+        tx_id = str(
+            transaction.get("trans_id") or
+            transaction.get("trans_num") or
+            f"{transaction.get('trans_date_trans_time', '')}_{transaction.get('cc_num', '')}_{transaction.get('amt', '')}"
+        )
+
+        fraud_prob = float(prediction.get("fraud_probability", 0))
+        # If the weight gets close to 0, GDS can run into problems in some algorithms,
+        # so a small floor value (0.01) is added.
+        fraud_weight = max(fraud_prob ** 2, 0.0001)
+
         tx.run(query, {
             "customer_id": str(transaction.get("cc_num", transaction.get("customer_id", "unknown"))),
             "merchant_id": str(transaction.get("merchant", transaction.get("merchant_id", "unknown"))),
             "category":    str(transaction.get("category", "")),
-            "tx_id":       str(transaction.get("trans_num", f"tx_{time.time_ns()}")),
+            "tx_id":       tx_id,
             "amount":      float(transaction.get("amt", 0)),
             "timestamp":   transaction.get("trans_date_trans_time", datetime.utcnow().isoformat()),
             "hour":        int(transaction.get("hour", 0)),
             "day_of_week": int(transaction.get("day_of_week", 0)),
             "is_fraud":    bool(prediction.get("is_fraud", False)),
-            "fraud_prob":  float(prediction.get("fraud_probability", 0)),
+            "fraud_prob":  fraud_prob,
             "risk_level":  prediction.get("risk_level", "LOW"),
             "ae_anomaly":  float(prediction.get("ae_anomaly_score", 0)),
+            "fraud_weight": fraud_weight,
         })
 
     # =========================================================================
-    # Graph Analytics — PageRank + Louvain Community Detection
+    # Graph Analytics — GDS PageRank + Louvain Community Detection
     # =========================================================================
+
+    def _project_graph(self, session):
+        """
+        Create the GDS in-memory graph projection (drop the old one first if it exists).
+
+        IMPORTANT: Since the graph schema is tripartite, i.e.
+        (Customer)-[:MADE]->(Transaction)-[:AT]->(Merchant), the `Transaction`
+        node must also be included in the projection. If only ['Customer', 'Merchant']
+        are projected, one end of the MADE/AT relationships (Transaction) stays
+        outside the graph and these relationships never enter the projection — as a
+        result, the Customer/Merchant nodes stay completely isolated from each other
+        (PageRank giving every node the default (1 - damping) score,
+        i.e. a constant 0.15, is a symptom of this isolation — this bug
+        was found in a previous version and fixed here).
+        """
+        session.run(f"""
+            CALL gds.graph.exists('{GDS_GRAPH_NAME}') YIELD exists
+            WHERE exists
+            CALL gds.graph.drop('{GDS_GRAPH_NAME}') YIELD graphName
+            RETURN graphName
+        """)
+        session.run(f"""
+            CALL gds.graph.project(
+                '{GDS_GRAPH_NAME}',
+                ['Customer', 'Merchant', 'Transaction'],
+                {{
+                    MADE: {{orientation: 'UNDIRECTED', properties: 'fraud_weight'}},
+                    AT:   {{orientation: 'UNDIRECTED', properties: 'fraud_weight'}}
+                }}
+            )
+        """)
 
     def run_pagerank(self) -> list:
         """
-        PageRank ile en riskli müşterileri bul.
-        Fraud işlem yapan müşterilerin bağlantıları üzerinden yayılım.
+        Find the riskiest customers with fraud-weighted PageRank.
 
-        GDS (Graph Data Science) kütüphanesi gerektirir.
-        GDS yoksa basit Cypher sorgusu ile yaklaşık hesaplama yapılır.
+        If GDS is installed: `gds.pageRank.stream` is used with `fraud_weight`
+        as the relationshipWeightProperty — i.e. the score is not pure connection
+        centrality but centrality weighted towards fraud transactions.
+
+        If GDS is not installed: falls back to a simple Cypher aggregation
+        (fraud_count × avg_prob) and logs it (it is not scientifically
+        equivalent to PageRank).
         """
         if not self._connected:
             return []
 
+        if not self._gds_available:
+            return self._run_pagerank_heuristic_fallback()
+
         try:
             with self.driver.session() as session:
-                # Önce GDS varlığını kontrol et
+                self._project_graph(session)
+
+                result = session.run(f"""
+                    CALL gds.pageRank.stream(
+                        '{GDS_GRAPH_NAME}',
+                        {{relationshipWeightProperty: 'fraud_weight'}}
+                    )
+                    YIELD nodeId, score
+                    WITH gds.util.asNode(nodeId) AS node, score
+                    WHERE node:Customer
+                    RETURN node.id AS customer_id,
+                           round(score, 6) AS pagerank_score
+                    ORDER BY pagerank_score DESC
+                    LIMIT 20
+                """)
+                return [dict(record) for record in result]
+
+        except Exception as e:
+            logger.error(f"GDS PageRank hatası: {e}, heuristic fallback'e geçiliyor")
+            return self._run_pagerank_heuristic_fallback()
+
+    def _run_pagerank_heuristic_fallback(self) -> list:
+        """Simple Cypher-based risk score (heuristic) used when GDS is unavailable."""
+        try:
+            with self.driver.session() as session:
                 result = session.run("""
                     MATCH (c:Customer)-[:MADE]->(t:Transaction)
                     WHERE t.is_fraud = true
@@ -191,27 +295,107 @@ class Neo4jClient:
                     LIMIT 20
                 """)
                 return [dict(record) for record in result]
-
         except Exception as e:
-            logger.error(f"PageRank hatası: {e}")
+            logger.error(f"Heuristic PageRank hatası: {e}")
             return []
 
-    def detect_fraud_rings(self, min_shared_merchants: int = 3) -> list:
+    def detect_fraud_rings(self, min_community_size: int = 3) -> list:
         """
-        Fraud ring tespiti: Aynı merchant'larda fraud yapan müşteri kümelerini bul.
-        Bu, Louvain community detection'ın basitleştirilmiş versiyonudur.
+        Find fraud ring candidates with Louvain community detection.
 
-        Mantık: İki müşteri aynı merchant'ta fraud yaptıysa, aralarında
-        "fraud_ring" ilişkisi olabilir. min_shared_merchants kadar ortak
-        merchant'ı olanlar potansiyel fraud ring'dir.
+        If GDS is installed: communities are found with `gds.louvain.stream`, then
+        the fraud rate is computed for each community and a "lift" (significance)
+        score is derived relative to the overall average fraud rate. Only
+        communities with lift > 1.0 (i.e. riskier than average) are returned
+        as fraud ring candidates.
+
+        If GDS is not installed: falls back to a simple approximation (heuristic)
+        based on a "number of shared merchants" threshold.
         """
         if not self._connected:
             return []
 
+        if not self._gds_available:
+            return self._detect_fraud_rings_heuristic_fallback()
+
+        try:
+            with self.driver.session() as session:
+                self._project_graph(session)
+
+                # Overall (baseline) fraud rate — reference for computing lift
+                baseline = session.run("""
+                    MATCH (t:Transaction)
+                    RETURN avg(CASE WHEN t.is_fraud THEN 1.0 ELSE 0.0 END) AS baseline_rate,
+                           count(t) AS total_tx
+                """).single()
+                baseline_rate = baseline["baseline_rate"] or 0.0001
+
+                # Assign communities with Louvain (written as a property)
+                session.run(f"""
+                    CALL gds.louvain.write(
+                        '{GDS_GRAPH_NAME}',
+                        {{
+                            relationshipWeightProperty: 'fraud_weight',
+                            writeProperty: 'community_id'
+                        }}
+                    )
+                """)
+
+                # For each community: customer count, total tx, fraud tx, fraud rate, lift
+                result = session.run("""
+                    MATCH (c:Customer)
+                    WHERE c.community_id IS NOT NULL
+                    MATCH (c)-[:MADE]->(t:Transaction)
+                    WITH c.community_id AS community_id,
+                         COUNT(DISTINCT c) AS n_customers,
+                         COUNT(t) AS n_transactions,
+                         SUM(CASE WHEN t.is_fraud THEN 1 ELSE 0 END) AS n_fraud
+                    WHERE n_customers >= $min_size
+                    WITH community_id, n_customers, n_transactions, n_fraud,
+                         toFloat(n_fraud) / n_transactions AS fraud_rate
+                    RETURN community_id,
+                           n_customers,
+                           n_transactions,
+                           n_fraud,
+                           round(fraud_rate, 4) AS fraud_rate
+                    ORDER BY fraud_rate DESC
+                    LIMIT 50
+                """, min_size=min_community_size)
+
+                rings = []
+                for record in result:
+                    d = dict(record)
+                    d["baseline_fraud_rate"] = round(baseline_rate, 4)
+                    d["lift"] = (
+                        round(d["fraud_rate"] / baseline_rate, 2)
+                        if baseline_rate > 0 else None
+                    )
+                    rings.append(d)
+
+                # Count only communities riskier than the average as fraud ring candidates
+                significant_rings = [r for r in rings if (r["lift"] or 0) > 1.0]
+
+                if significant_rings:
+                    logger.info(
+                        f"  🔍 Louvain: {len(significant_rings)} anlamlı (lift>1.0) "
+                        f"fraud ring community'si bulundu (toplam community: {len(rings)})"
+                    )
+                return significant_rings
+
+        except Exception as e:
+            logger.error(f"GDS Louvain hatası: {e}, heuristic fallback'e geçiliyor")
+            return self._detect_fraud_rings_heuristic_fallback()
+
+    def _detect_fraud_rings_heuristic_fallback(self, min_shared_merchants: int = 3) -> list:
+        """
+        Simple approximation used when GDS is unavailable: finds pairs of customers
+        who committed fraud at the same merchants, based on a shared-merchant-count
+        threshold. It does not have the mathematical foundation of real Louvain
+        community detection; it is only a pairwise matching.
+        """
         try:
             with self.driver.session() as session:
                 result = session.run("""
-                    // Fraud yapan müşterilerin ortak merchant'larını bul
                     MATCH (c1:Customer)-[:MADE]->(t1:Transaction)-[:AT]->(m:Merchant)
                           <-[:AT]-(t2:Transaction)<-[:MADE]-(c2:Customer)
                     WHERE t1.is_fraud = true
@@ -229,17 +413,26 @@ class Neo4jClient:
                 """, min_shared=min_shared_merchants)
                 rings = [dict(record) for record in result]
                 if rings:
-                    logger.info(f"  🔍 {len(rings)} potansiyel fraud ring bağlantısı bulundu")
+                    logger.info(f"  🔍 (heuristic) {len(rings)} potansiyel fraud ring bağlantısı bulundu")
                 return rings
-
         except Exception as e:
-            logger.error(f"Fraud ring detection hatası: {e}")
+            logger.error(f"Heuristic fraud ring detection hatası: {e}")
             return []
+
+    def detect_fraud_ring_pairs(self, min_shared_merchants: int = 3) -> list:
+        """
+        Public pairwise variant used by the dashboard API: pairs of customers who
+        committed fraud at the same merchants (keys: customer_1, customer_2,
+        shared_merchant_count, sample_merchants). Independent of GDS.
+        """
+        if not self._connected:
+            return []
+        return self._detect_fraud_rings_heuristic_fallback(min_shared_merchants)
 
     def get_customer_graph_features(self, customer_id: str) -> dict:
         """
-        Tek bir müşteri için graph-based risk feature'larını çıkar.
-        Bu feature'lar ML modeline ek sinyal olarak beslenebilir.
+        Extract graph-based risk features for a single customer.
+        These features can be fed to the ML model as an additional signal.
         """
         if not self._connected:
             return {}
@@ -256,7 +449,8 @@ class Neo4jClient:
                         COUNT(DISTINCT m.id) AS unique_merchants,
                         ROUND(AVG(t.amount), 2) AS avg_amount,
                         ROUND(MAX(t.fraud_prob), 4) AS max_fraud_prob,
-                        c.has_fraud AS has_prior_fraud
+                        c.has_fraud AS has_prior_fraud,
+                        c.community_id AS community_id
                 """, cid=customer_id)
 
                 record = result.single()
@@ -269,7 +463,7 @@ class Neo4jClient:
             return {}
 
     def get_graph_stats(self) -> dict:
-        """Genel graph istatistikleri."""
+        """Overall graph statistics."""
         if not self._connected:
             return {"connected": False}
 
@@ -287,6 +481,7 @@ class Neo4jClient:
                 if record:
                     return {
                         "connected": True,
+                        "gds_available": self._gds_available,
                         "customers": record["customers"],
                         "merchants": record["merchants"],
                         "transactions": record["transactions"],
@@ -294,10 +489,21 @@ class Neo4jClient:
                     }
         except Exception as e:
             logger.error(f"Graph stats hatası: {e}")
-        return {"connected": True, "error": "stats query failed"}
+        return {"connected": True, "gds_available": self._gds_available, "error": "stats query failed"}
 
     def close(self):
-        """Bağlantıyı kapat."""
+        """Close the connection (also drop the GDS in-memory graph, if any)."""
+        if self.driver and self._gds_available:
+            try:
+                with self.driver.session() as session:
+                    session.run(f"""
+                        CALL gds.graph.exists('{GDS_GRAPH_NAME}') YIELD exists
+                        WHERE exists
+                        CALL gds.graph.drop('{GDS_GRAPH_NAME}') YIELD graphName
+                        RETURN graphName
+                    """)
+            except Exception:
+                pass
         if self.driver:
             self.driver.close()
             logger.info("Neo4j bağlantısı kapatıldı.")

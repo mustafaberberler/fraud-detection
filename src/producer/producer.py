@@ -1,18 +1,18 @@
 """
 Kafka Producer — Sparkov Transaction Streamer
 ==============================================
-Feature-engineered CSV dosyasından gerçek kayıtları okuyup
-Kafka'ya stream eder. Kontrol edilebilir hızda (TPS) çalışır.
+Reads real records from the feature-engineered CSV file and
+streams them to Kafka. Runs at a controllable rate (TPS).
 
-Kullanım:
+Usage:
     python -m producer.producer
     python -m producer.producer --tps 500 --data ./data/test.csv
 
-Mevcut (dummy) producer'dan farkları:
-  - Gerçek Sparkov verisi kullanır (rastgele değil)
-  - Feature-engineered 20 feature + ham alanlar
-  - Kontrol edilebilir TPS (throughput testi için)
-  - Kafka timestamp + partition key desteği
+Differences from the existing (dummy) producer:
+  - Uses real Sparkov data (not random)
+  - Feature-engineered 20 features + raw fields
+  - Controllable TPS (for throughput testing)
+  - Kafka timestamp + partition key support
 """
 
 import json
@@ -55,25 +55,25 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 def create_producer() -> KafkaProducer:
-    """Kafka producer oluştur (JSON serializer ile)."""
+    """Create a Kafka producer (with a JSON serializer)."""
     return KafkaProducer(
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
         key_serializer=lambda k: k.encode("utf-8") if k else None,
         acks="all",
         retries=3,
-        linger_ms=5,       # Küçük batch'ler için düşük latency
+        linger_ms=5,       # Low latency for small batches
         batch_size=16384,
     )
 
 
 def load_data(path: str) -> pd.DataFrame:
-    """CSV dosyasını yükle."""
+    """Load the CSV file."""
     logger.info(f"Veri yükleniyor: {path}")
     df = pd.read_csv(path)
     logger.info(f"  {len(df):,} kayıt yüklendi, {df.shape[1]} kolon")
 
-    # is_fraud varsa dağılımı göster
+    # Show the distribution if is_fraud exists
     if "is_fraud" in df.columns:
         fraud_count = df["is_fraud"].sum()
         logger.info(f"  Fraud: {fraud_count:,} ({fraud_count/len(df)*100:.2f}%)")
@@ -84,13 +84,13 @@ def load_data(path: str) -> pd.DataFrame:
 def stream_transactions(producer: KafkaProducer, df: pd.DataFrame,
                         tps: int, topic: str):
     """
-    DataFrame'deki kayıtları Kafka'ya belirli TPS hızında stream et.
+    Stream the records in the DataFrame to Kafka at a given TPS rate.
 
     Args:
         producer: Kafka producer
         df: Feature-engineered DataFrame
-        tps: Hedef transaction per second
-        topic: Kafka topic adı
+        tps: Target transactions per second
+        topic: Kafka topic name
     """
     global _running
 
@@ -107,16 +107,16 @@ def stream_transactions(producer: KafkaProducer, df: pd.DataFrame,
         if not _running:
             break
 
-        # DataFrame satırını JSON'a çevir
+        # Convert the DataFrame row to JSON
         record = row.to_dict()
 
-        # NaN temizliği
+        # NaN cleanup
         record = {
             k: (None if pd.isna(v) else v)
             for k, v in record.items()
         }
 
-        # Partition key = customer ID (aynı müşterinin işlemleri aynı partition'a)
+        # Partition key = customer ID (transactions of the same customer go to the same partition)
         partition_key = str(record.get("cc_num", ""))
 
         try:
@@ -127,7 +127,7 @@ def stream_transactions(producer: KafkaProducer, df: pd.DataFrame,
             )
             sent_count += 1
 
-            # İlerleme raporu (her 1000 işlemde)
+            # Progress report (every 1000 transactions)
             if sent_count % 1000 == 0:
                 elapsed = time.time() - start_time
                 actual_tps = sent_count / elapsed if elapsed > 0 else 0
@@ -167,13 +167,13 @@ def main():
     parser.add_argument("--loop", action="store_true", help="Veri bitince başa sar")
     args = parser.parse_args()
 
-    # Veri yükle
+    # Load the data
     df = load_data(args.data)
     if args.limit:
         df = df.head(args.limit)
         logger.info(f"  Limit uygulandı: {args.limit:,} kayıt")
 
-    # Producer oluştur
+    # Create the producer
     producer = create_producer()
     logger.info(f"  Kafka producer hazır: {KAFKA_BOOTSTRAP_SERVERS}")
 

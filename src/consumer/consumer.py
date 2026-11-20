@@ -1,24 +1,24 @@
 """
-Kafka Consumer — Gerçek Zamanlı Fraud Detection Pipeline
+Kafka Consumer — Real-Time Fraud Detection Pipeline
 ========================================================
-raw-transactions topic'inden okur, tam pipeline çalıştırır:
+Reads from the raw-transactions topic and runs the full pipeline:
 
-  İşlem → [AE anomaly] → [LightGBM tahmin] → [SHAP açıklama]
-       → [Neo4j graf yazma] → [Drift biriktirme]
-       → fraud-results topic'ine yazar
+  Transaction → [AE anomaly] → [LightGBM prediction] → [SHAP explanation]
+       → [Neo4j graph write] → [Drift accumulation]
+       → writes to the fraud-results topic
 
-Prometheus metrikleri /metrics endpoint'inden sunulur.
+Prometheus metrics are served from the /metrics endpoint.
 
-Kullanım:
+Usage:
     python -m consumer.consumer
 
-Tez önerisindeki hedefler:
+Targets in the thesis proposal:
   - p95 latency ≤ 200ms
   - throughput ≥ 1000 TPS
-  - Gerçek zamanlı SHAP açıklama
-  - Neo4j graf güncelleme
-  - PSI/KL drift izleme
-  - Analist feedback loop
+  - Real-time SHAP explanation
+  - Neo4j graph update
+  - PSI/KL drift monitoring
+  - Analyst feedback loop
 """
 
 import json
@@ -27,6 +27,7 @@ import logging
 import signal
 import sys
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
@@ -59,22 +60,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Prometheus Metrikleri
+# Prometheus Metrics
 # =============================================================================
 TRANSACTIONS_TOTAL = Counter(
     "fraud_transactions_total",
-    "Toplam işlenen işlem sayısı",
+    "Total number of processed transactions",
     ["risk_level"],
 )
 
 FRAUD_DETECTED = Counter(
     "fraud_detected_total",
-    "Tespit edilen fraud sayısı",
+    "Number of detected frauds",
 )
 
 PIPELINE_LATENCY = Histogram(
     "pipeline_latency_seconds",
-    "Tam pipeline latency (AE→LightGBM→SHAP→Neo4j)",
+    "Full pipeline latency (AE→LightGBM→SHAP→Neo4j)",
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0),
 )
 
@@ -86,19 +87,19 @@ INFERENCE_LATENCY = Histogram(
 
 NEO4J_LATENCY = Histogram(
     "neo4j_write_latency_seconds",
-    "Neo4j yazma süresi",
+    "Neo4j write duration",
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5),
 )
 
 DRIFT_ALERTS = Counter(
     "drift_alerts_total",
-    "Toplam drift alarmı sayısı",
+    "Total number of drift alerts",
     ["severity"],
 )
 
 THROUGHPUT_GAUGE = Gauge(
     "pipeline_throughput_tps",
-    "Anlık throughput (TPS)",
+    "Current throughput (TPS)",
 )
 
 # =============================================================================
@@ -122,7 +123,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 # =============================================================================
 class FraudDetectionConsumer:
     """
-    Ana Kafka consumer. Tüm bileşenleri orkestra eder:
+    Main Kafka consumer. Orchestrates all the components:
       - ML Inference (AE + LightGBM + SHAP)
       - Neo4j graph write
       - Drift monitoring
@@ -141,21 +142,23 @@ class FraudDetectionConsumer:
         self._processed = 0
         self._start_time = None
 
+        self._dice_executor = ThreadPoolExecutor(max_workers=2)
+
     def initialize(self):
-        """Tüm bileşenleri başlat."""
+        """Initialize all the components."""
         logger.info("=" * 60)
         logger.info("  Fraud Detection Pipeline başlatılıyor...")
         logger.info("=" * 60)
 
-        # 1. ML modelleri yükle
+        # 1. Load the ML models
         logger.info("\n[1/5] ML modelleri yükleniyor...")
         self.engine.load_models()
 
-        # 2. Drift referans dağılımlarını yükle
+        # 2. Load the drift reference distributions
         logger.info("\n[2/5] Drift referans dağılımları yükleniyor...")
         self.drift_monitor.load_reference()
 
-        # 3. Neo4j bağlantısı
+        # 3. Neo4j connection
         logger.info("\n[3/5] Neo4j bağlantısı kuruluyor...")
         self.neo4j.connect()
 
@@ -173,7 +176,7 @@ class FraudDetectionConsumer:
         )
         logger.info(f"  ✓ Subscribed: {KAFKA_TOPICS['raw_transactions']}")
 
-        # 5. Kafka producer (sonuç yayınlama için)
+        # 5. Kafka producer (for publishing results)
         logger.info("\n[5/5] Kafka result producer oluşturuluyor...")
         self.producer = KafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
@@ -197,7 +200,7 @@ class FraudDetectionConsumer:
 
         try:
             while _running:
-                # Poll with timeout (graceful shutdown için)
+                # Poll with timeout (for graceful shutdown)
                 records = self.consumer.poll(timeout_ms=1000)
 
                 for topic_partition, messages in records.items():
@@ -213,15 +216,22 @@ class FraudDetectionConsumer:
 
     def _process_transaction(self, transaction: dict):
         """
-        Tek bir işlemi tam pipeline'dan geçir.
+        Pass a single transaction through the full pipeline.
 
-        Sıra:
+        Order:
           1. ML inference (AE → LightGBM → SHAP)
-          2. Neo4j graf yazma
+          2. Neo4j graph write
           3. Drift accumulation
-          4. Sonucu fraud-results topic'ine yaz
-          5. Prometheus metrikleri güncelle
+          4. Write the result to the fraud-results topic
+          5. Update the Prometheus metrics
         """
+
+        # Generate a consistent unique ID (same formula as server.py normalize_transaction)
+        ts_raw = str(transaction.get("trans_date_trans_time", ""))
+        cust   = str(transaction.get("cc_num", ""))
+        amt    = str(transaction.get("amt", ""))
+        txn_id = f"txn_{abs(hash(ts_raw + cust + amt)) % 10**9:09d}"
+
         t_pipeline_start = time.perf_counter()
 
         # === 1. ML Inference ===
@@ -241,16 +251,17 @@ class FraudDetectionConsumer:
         # === 3. Drift Accumulation ===
         self.drift_monitor.accumulate(transaction)
 
-        # Drift kontrolü zamanı geldiyse
+        # If it is time for a drift check
         if self.drift_monitor.should_check():
             drift_alert = self.drift_monitor.check_drift()
             if drift_alert:
                 self._publish_drift_alert(drift_alert)
 
-        # === 4. Sonucu yayınla ===
+        # === 4. Publish the result ===
         result = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "transaction_id": transaction.get("trans_num", ""),
+            "transaction_id": txn_id,  # instead of trans_num
+            "trans_id": txn_id,  # ← for Neo4j
             "customer_id": str(transaction.get("cc_num", "")),
             "merchant": transaction.get("merchant", ""),
             "amount": transaction.get("amt", 0),
@@ -278,7 +289,16 @@ class FraudDetectionConsumer:
         except KafkaError as e:
             logger.error(f"Result publish hatası: {e}")
 
-        # === 5. Prometheus Metrikleri ===
+        # === DiCE — only if fraud, compute asynchronously ===
+        if prediction["is_fraud"]:
+            self._dice_executor.submit(
+                self._compute_and_publish_counterfactual,
+                transaction,
+                prediction,
+                result["transaction_id"],
+            )
+
+        # === 5. Prometheus Metrics ===
         pipeline_time = time.perf_counter() - t_pipeline_start
         PIPELINE_LATENCY.observe(pipeline_time)
         TRANSACTIONS_TOTAL.labels(risk_level=prediction["risk_level"]).inc()
@@ -288,12 +308,12 @@ class FraudDetectionConsumer:
 
         self._processed += 1
 
-        # TPS hesapla
+        # Compute TPS
         elapsed = time.time() - self._start_time
         if elapsed > 0:
             THROUGHPUT_GAUGE.set(self._processed / elapsed)
 
-        # Log (fraud tespit edildiğinde veya her 100 işlemde)
+        # Log (when fraud is detected or every 100 transactions)
         if prediction["is_fraud"]:
             logger.warning(
                 f"🔴 FRAUD | prob={prediction['fraud_probability']:.4f} "
@@ -309,9 +329,35 @@ class FraudDetectionConsumer:
                 f"TPS: {tps:,.0f} | "
                 f"p_latency: {pipeline_time*1000:.1f}ms"
             )
+        
+    def _compute_and_publish_counterfactual(
+        self, transaction: dict, prediction: dict, txn_id: str
+    ):
+        """
+        Compute the DiCE counterfactual explanation asynchronously and
+        send it to the fraud-results topic as a patch.
+        """
+        try:
+            t0 = time.perf_counter()
+            cf = self.engine.explain_counterfactual(transaction, prediction)
+            elapsed = (time.perf_counter() - t0) * 1000
+
+            if cf:
+                patch = {
+                    "transaction_id": txn_id,
+                    "counterfactual": cf,
+                    "counterfactual_latency_ms": round(elapsed, 2),
+                    "type": "counterfactual_patch",
+                }
+                self.producer.send(KAFKA_TOPICS["fraud_results"], value=patch)
+                logger.info(
+                    f"  🔬 DiCE tamamlandı: {txn_id} ({elapsed:.0f}ms)"
+                )
+        except Exception as e:
+            logger.error(f"DiCE hatası ({txn_id}): {e}")
 
     def _publish_drift_alert(self, alert: dict):
-        """Drift alert'i Kafka topic'ine yayınla."""
+        """Publish the drift alert to the Kafka topic."""
         try:
             self.producer.send(KAFKA_TOPICS["drift_alerts"], value=alert)
             DRIFT_ALERTS.labels(severity=alert["overall_status"]).inc()
@@ -324,29 +370,31 @@ class FraudDetectionConsumer:
 
     def process_analyst_feedback(self, feedback: dict):
         """
-        Analist geri bildirimlerini işle (feedback loop).
-        analyst-feedback topic'inden okunur.
+        Process analyst feedback (feedback loop).
+        Read from the analyst-feedback topic.
 
-        Feedback formatı:
+        Feedback format:
         {
             "transaction_id": "...",
-            "analyst_label": true/false,  # gerçek fraud mı?
+            "analyst_label": true/false,  # is it real fraud?
             "analyst_id": "...",
             "timestamp": "..."
         }
 
-        Bu feedback'ler biriktirilir ve periyodik retrain'i tetikler.
+        These feedbacks are accumulated and trigger periodic retraining.
         """
         logger.info(
             f"Feedback alındı: tx={feedback.get('transaction_id')} "
             f"label={feedback.get('analyst_label')}"
         )
-        # TODO: Feedback'leri biriktir, yeterli sayıya ulaşınca
-        # retrain pipeline'ını tetikle (MLflow integration)
+        # TODO: Accumulate the feedbacks and, once enough have been reached,
+        # trigger the retrain pipeline (MLflow integration)
 
     def _shutdown(self):
-        """Temiz kapanış."""
+        """Clean shutdown."""
         logger.info("\nPipeline kapatılıyor...")
+
+        self._dice_executor.shutdown(wait=False)  # ← added
 
         if self.consumer:
             self.consumer.close()

@@ -1,8 +1,8 @@
 """
-Merkezi Konfigürasyon — Kafka Fraud Detection Pipeline
+Central Configuration — Kafka Fraud Detection Pipeline
 ======================================================
-Tüm servisler (producer, consumer, neo4j, drift) bu dosyadan okur.
-Ortam değişkenleri ile override edilebilir.
+All services (producer, consumer, neo4j, drift) read from this file.
+Can be overridden with environment variables.
 """
 
 import os
@@ -29,12 +29,20 @@ MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(_BASE_DIR, "models"))
 
 LGBM_MODEL_PATH          = os.path.join(MODEL_DIR, "lgbm_model.pkl")
 LGBM_CONTRACT_PATH        = os.path.join(MODEL_DIR, "lgbm_feature_contract.json")
-AE_MODEL_PATH             = os.path.join(MODEL_DIR, "autoencoder_model.keras")
+AE_MODEL_PATH             = os.path.join(MODEL_DIR, "autoencoder.keras")
 AE_SCALER_PATH            = os.path.join(MODEL_DIR, "ae_scaler.pkl")
 REFERENCE_DIST_PATH       = os.path.join(MODEL_DIR, "reference_distributions.json")
 
+# Reference data for the DiCE counterfactual explainer (first 500 rows are used).
+# Defaults to <repo>/data/...; override with the DICE_REFERENCE_DATA_PATH env var.
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(_BASE_DIR, "data"))
+DICE_REFERENCE_DATA_PATH = os.getenv(
+    "DICE_REFERENCE_DATA_PATH",
+    os.path.join(DATA_DIR, "train_2019_with_ae_scores.csv"),
+)
+
 # =============================================================================
-# Feature Contract (train_lightgbm.ipynb ile aynı)
+# Feature Contract (same as train_lightgbm.ipynb)
 # =============================================================================
 LGBM_FEATURES = [
     "amt", "age", "city_pop", "geo_distance_km", "geo_distance_log",
@@ -43,11 +51,12 @@ LGBM_FEATURES = [
     "is_online", "is_pos", "category", "gender", "ae_anomaly_score",
 ]
 
-# AE modeli bu 14 feature'ı kullanır (train_ae.ipynb'den)
+# The AE model uses these 14 features, in this exact order (from train_ae.ipynb).
+# The order must match the fitted ae_scaler.pkl (RobustScaler.feature_names_in_).
 AE_FEATURES = [
-    "amt", "age", "city_pop", "geo_distance_km", "geo_distance_log",
-    "time_since_last_tx", "tx_count_1h", "amt_sum_24h", "amt_mean_hist",
-    "amt_vs_mean", "hour", "day_of_week", "month", "ae_anomaly_score",
+    "amt", "hour", "day_of_week", "is_weekend", "is_night", "age",
+    "geo_distance_log", "city_pop", "time_since_last_tx", "tx_count_1h",
+    "amt_sum_24h", "amt_vs_mean", "is_online", "is_pos",
 ]
 
 CATEGORICAL_FEATURES = ["category", "gender"]
@@ -68,8 +77,8 @@ KL_THRESHOLDS = {
     "critical": 0.2,
 }
 
-DRIFT_WINDOW_SIZE     = 5000   # Kaç işlem birikmeli ki drift kontrol edilsin
-DRIFT_CHECK_INTERVAL  = 5000   # Her N işlemde bir drift kontrolü
+DRIFT_WINDOW_SIZE     = 5000   # How many transactions must accumulate before drift is checked
+DRIFT_CHECK_INTERVAL  = 5000   # Check drift once every N transactions
 
 # =============================================================================
 # Neo4j
@@ -79,7 +88,7 @@ NEO4J_USER     = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "fraud-detection-2024")
 
 # =============================================================================
-# Performance Targets (tez önerisinden)
+# Performance Targets (from the thesis proposal)
 # =============================================================================
 TARGET_P95_LATENCY_MS = 200    # p95 ≤ 200ms
 TARGET_THROUGHPUT_TPS = 1000   # ≥ 1000 TPS
@@ -96,4 +105,5 @@ PRODUCER_RATE_TPS  = int(os.getenv("PRODUCER_RATE_TPS", "100"))
 # =============================================================================
 # Prometheus
 # =============================================================================
-PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "8000"))
+##PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "8000"))
+PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "8099"))

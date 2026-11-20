@@ -6,7 +6,7 @@
 #
 # Servisler:
 #   - Kafka + Zookeeper  : Mesaj kuyruğu
-#   - Neo4j              : Graf veritabanı (fraud ring analizi)
+#   - Neo4j (+ GDS)       : Graf veritabanı (PageRank, Louvain fraud ring analizi)
 #   - Prometheus          : Metrik toplama
 #   - Grafana             : Dashboard görselleştirme
 #
@@ -105,8 +105,13 @@ services:
       "
 
   # ---------------------------------------------------------------------------
-  # Neo4j Graph Database
+  # Neo4j Graph Database (+ Graph Data Science / GDS)
   # ---------------------------------------------------------------------------
+  # GDS eklentisi gerçek PageRank (gds.pageRank.stream) ve Louvain community
+  # detection (gds.louvain.stream/write) algoritmalarını çalıştırmak için
+  # gereklidir — fraud ring analizinde heuristic yaklaşımların yerini alır.
+  # GDS graf projeksiyonu bellekte (heap) tutulduğu için heap/pagecache
+  # boyutları, basit yazma-amaçlı kullanıma göre artırıldı.
   neo4j:
     image: neo4j:5.15-community
     container_name: fraud-neo4j
@@ -116,8 +121,14 @@ services:
     environment:
       NEO4J_AUTH: neo4j/fraud-detection-2024
       NEO4J_PLUGINS: '["graph-data-science"]'
-      NEO4J_dbms_memory_heap_max__size: 1G
-      NEO4J_dbms_memory_pagecache_size: 512M
+      # GDS prosedürlerine erişim için (Community Edition + GDS uyumu)
+      NEO4J_dbms_security_procedures_unrestricted: "gds.*"
+      NEO4J_dbms_security_procedures_allowlist: "gds.*"
+      # GDS in-memory graf projeksiyonu için heap/pagecache yükseltildi
+      # (önceki: 1G heap / 512M pagecache — PageRank/Louvain projeksiyonu için yetersiz kalabilir)
+      NEO4J_dbms_memory_heap_max__size: 2G
+      NEO4J_dbms_memory_heap_initial__size: 1G
+      NEO4J_dbms_memory_pagecache_size: 1G
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
@@ -135,6 +146,10 @@ services:
     container_name: fraud-prometheus
     ports:
       - "9090:9090"
+    # Lets the container reach the consumer running on the host (:8099) on Linux too;
+    # Docker Desktop (Windows/macOS) already provides host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
@@ -153,8 +168,13 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: fraud2024
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fraud.json
+      GF_SECURITY_ALLOW_EMBEDDING: true # ← bunu ekle
+      GF_AUTH_ANONYMOUS_ENABLED: true # ← login gerektirmesin
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer # ← viewer olarak aç
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
 
 volumes:
   neo4j_data:
